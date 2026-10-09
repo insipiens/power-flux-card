@@ -790,6 +790,18 @@ class PowerFluxCardEditor extends LitElement {
 
         <div class="separator"></div>
 
+        <div class="switch-row">
+            <ha-switch
+                .checked=${this._config.separate_battery_export === true}
+                .configValue=${'separate_battery_export'}
+                @change=${this._valueChanged}
+            ></ha-switch>
+            <div class="switch-label">${this._localize('editor.separate_battery_export')}</div>
+        </div>
+        <div style="font-size: 0.8em; color: var(--secondary-text-color); margin-top: -4px; margin-bottom: 4px;">
+            ${this._localize('editor.separate_battery_export_hint')}
+        </div>
+
         <ha-selector
             class="tight-label-field"
             .hass=${this.hass}

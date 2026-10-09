@@ -48,7 +48,7 @@ const imagesScript = '';
 console.log('Processing editor...');
 let editorContent = fs.readFileSync(path.join(SRC_DIR, 'power-flux-card-editor.js'), 'utf8');
 // Remove imports/exports if any
-editorContent = editorContent.replace(/import .* from .*/g, '').replace(/export .*/g, '');
+editorContent = editorContent.replace(/import .* from .*/g, '').replace(/^export .*/gm, '');
 // Remove editorTranslations/cardTranslations declarations (already created by build merge script)
 editorContent = editorContent.replace(/const editorTranslations\s*=\s*\{[^}]*\};/gs, '');
 editorContent = editorContent.replace(/const cardTranslations\s*=\s*\{[^}]*\};/gs, '');

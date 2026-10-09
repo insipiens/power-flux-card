@@ -96,6 +96,8 @@ export default {
     "editor.text_color": "Text Color",
     "editor.icon_color": "Icon Color",
     "editor.secondary_color": "Secondary",
+    "editor.separate_battery_export": "Separate battery export",
+    "editor.separate_battery_export_hint": "Splits grid export between solar and battery, with a direct battery-to-grid flow. Charging is allocated first, then solar export; remaining export comes from battery discharge.",
     "editor.battery_charge_via_house": "Battery charge via house consumption",
     "editor.battery_show_power": "Show power instead of SoC",
     "editor.solar_unit_kw": "Show Solar in kW",

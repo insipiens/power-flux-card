@@ -40,6 +40,7 @@ console.log(
       return {
         zoom: 0.9,
         compact_view: false,
+        separate_battery_export: false,
         compact_glow: false,
         compact_bar_selfuse: false,
         compact_icons_in_bracket: false,
@@ -653,6 +654,7 @@ console.log(
       .layout-standard   .pos-solar-house  { transform: translate(100px, 235px); }
       .layout-standard   .pos-solar-batt   { transform: translate(210px, 45px); }
       .layout-standard   .pos-grid-house   { transform: translate(235px, 195px); }
+      .layout-standard   .pos-batt-export  { transform: translate(290px, 125px); }
       .layout-standard   .pos-grid-batt    { transform: translate(290px, 145px); }
       .layout-standard   .pos-batt-house   { transform: translate(320px, 235px); }
       .layout-standard   .pos-export-solar { transform: translate(130px, 145px); }
@@ -661,6 +663,7 @@ console.log(
       .layout-horizontal .pos-solar-house  { transform: translate(225px, 340px); }
       .layout-horizontal .pos-solar-batt   { transform: translate(35px, 210px); }
       .layout-horizontal .pos-grid-house   { transform: translate(205px, 200px); }
+      .layout-horizontal .pos-batt-export  { transform: translate(85px, 135px); }
       .layout-horizontal .pos-grid-batt    { transform: translate(110px, 135px); }
       .layout-horizontal .pos-batt-house   { transform: translate(225px, 85px); }
       .layout-horizontal .pos-export-solar { transform: translate(110px, 295px); }
@@ -669,6 +672,7 @@ console.log(
       .layout-diamond    .pos-solar-house  { transform: translate(235px, 210px); }
       .layout-diamond    .pos-solar-batt   { transform: translate(285px, 160px); }
       .layout-diamond    .pos-grid-house   { transform: translate(130px, 225px); }
+      .layout-diamond    .pos-batt-export  { transform: translate(265px, 182px); }
       .layout-diamond    .pos-grid-batt    { transform: translate(130px, 182px); }
       .layout-diamond    .pos-batt-house   { transform: translate(285px, 225px); }
       .layout-diamond    .pos-export-solar { transform: translate(135px, 160px); }
@@ -749,6 +753,33 @@ console.log(
       const threshold = Math.max(0, parseFloat(this.config.grid_threshold) || 0);
       if (threshold === 0) return [gridImport, gridExport];
       return [gridImport < threshold ? 0 : gridImport, gridExport < threshold ? 0 : gridExport];
+    }
+
+    // Allocate charging first, then split export between available solar and battery
+    // discharge. These are inferred allocations, not source-specific measurements.
+    _getSeparateExportFlows(solar, gridImport, gridExport, batteryCharge, batteryDischarge, entities) {
+      const chargeViaHouse = this.config.battery_charge_via_house === true;
+      const gridChargeState = this.hass.states[entities.grid_to_battery];
+      const gridCharge = entities.grid_to_battery
+        ? Math.min(gridImport, batteryCharge, Math.abs(parseFloat(gridChargeState?.state) || 0))
+        : Math.min(gridImport, Math.max(0, batteryCharge - solar));
+      const solarCharge = Math.min(solar, Math.max(0, batteryCharge - gridCharge));
+      const solarExport = Math.min(Math.max(0, solar - solarCharge), gridExport);
+      const batteryExport = Math.min(batteryDischarge, Math.max(0, gridExport - solarExport));
+      const consumerProduction = [1, 2, 3, 4, 5].reduce((sum, idx) =>
+        sum + Math.max(0, -this._getConsumerValue(entities[`consumer_${idx}`], idx)), 0);
+      return {
+        solarToBatt: chargeViaHouse ? 0 : solarCharge,
+        gridToBatt: chargeViaHouse ? 0 : gridCharge,
+        solarToHouse: Math.max(0, solar - solarExport - (chargeViaHouse ? 0 : solarCharge)),
+        gridToHouse: Math.max(0, gridImport - (chargeViaHouse ? 0 : gridCharge)),
+        batteryToHouse: Math.max(0, batteryDischarge - batteryExport),
+        solarExport,
+        batteryExport,
+        // A bidirectional consumer may supply export through the existing House path.
+        houseExport: Math.min(consumerProduction, Math.max(0, gridExport - solarExport - batteryExport)),
+        consumption: Math.max(0, solar + gridImport + batteryDischarge + consumerProduction - gridExport - batteryCharge),
+      };
     }
 
     _formatPower(val) {
@@ -1060,6 +1091,7 @@ console.log(
         return getVal(entity) * (unitKw ? 1000 : 1);
       };
 
+      const separateBatteryExport = this.config.separate_battery_export === true;
       const solar = Math.max(0, this._getSolarTotal(entities));
       const hasGridCombined = !!(entities.grid_combined && entities.grid_combined !== "");
       const gridSign = this.config.invert_grid ? -1 : 1;
@@ -1078,10 +1110,12 @@ console.log(
       };
       const consumers = [1, 2, 3, 4, 5].map(idx => {
         const ent = entities[`consumer_${idx}`];
+        const raw = this._getConsumerValue(ent, idx);
         return {
           idx,
           entityId: ent,
-          val: Math.abs(this._getConsumerValue(ent, idx)),
+          production: separateBatteryExport ? Math.max(0, -raw) : 0,
+          val: separateBatteryExport ? Math.max(0, raw) : Math.abs(raw),
           icon: this.config[`consumer_${idx}_icon`] || consumerDefaults[idx].icon,
           label: this.config[`consumer_${idx}_label`] || consumerDefaults[idx].label,
           iconColor: `var(--icon-consumer-${idx}-color)`,
@@ -1140,10 +1174,16 @@ console.log(
       const gridTotalToCons = Math.max(0, gridImport - gridToBatt);
       const battTotalToCons = batteryDischarge;
 
-      const totalCons = solarTotalToCons + gridTotalToCons + battTotalToCons;
+      const splitFlows = separateBatteryExport
+        ? this._getSeparateExportFlows(solar, gridImport, gridExport, batteryCharge, batteryDischarge, entities)
+        : null;
+      const totalCons = separateBatteryExport ? splitFlows.consumption
+        : solarTotalToCons + gridTotalToCons + battTotalToCons;
+      const measuredConsumption = separateBatteryExport && entities.house
+        ? Math.max(0, getVal(entities.house)) : totalCons;
 
       // Calculate Splits: each consumer takes its share of the total, the remainder is the house
-      let remainingCons = totalCons;
+      let remainingCons = measuredConsumption;
       consumers.forEach(c => {
         c.power = (c.val > 0 && remainingCons > 0) ? Math.min(c.val, remainingCons) : 0;
         remainingCons -= c.power;
@@ -1159,12 +1199,13 @@ console.log(
       const srcSolar = solar; // Solar includes Export + Charge + Cons
       const srcGrid = gridImport;
 
-      const totalFlux = srcBattery + srcSolar + srcGrid;
+      const srcConsumers = consumers.reduce((sum, c) => sum + c.production, 0);
+      const totalFlux = srcBattery + srcSolar + srcGrid + srcConsumers;
 
       // DESTINATIONS (for Bottom Brackets)
       // With "charge via house" the battery is fed out of the house total, so its share has to be
       // removed from the house bracket - otherwise the brackets add up to more than the bar itself.
-      const destHouse = batteryChargeViaHouse ? Math.max(0, housePower - batteryCharge) : housePower;
+      const destHouse = !separateBatteryExport && batteryChargeViaHouse ? Math.max(0, housePower - batteryCharge) : housePower;
       const destExport = gridExport;
 
       // Color roles for the compact view, so every picker in the editor has a visible effect here:
@@ -1218,6 +1259,12 @@ console.log(
       const selfConsum = destHouse + consumerTotal + batteryCharge;
       const selfPV = Math.min(srcSolar, selfConsum);
       const selfBattery = Math.min(srcBattery, Math.max(0, selfConsum - selfPV));
+      let remainingSelfUse = Math.max(0, selfConsum - selfPV - selfBattery);
+      const selfProducers = consumers.map(c => {
+        const power = Math.min(c.production, remainingSelfUse);
+        remainingSelfUse -= power;
+        return { ...c, power };
+      });
 
       const threshold = 0.1;
       const measuredWidth = (this._cardWidth && this._cardWidth > 0)
@@ -1261,12 +1308,14 @@ console.log(
         // Self consumption view: what is actually used on site, plus the exported surplus
         addSegment(selfPV, colSolar.bubble, 'solar', 'solar', entities.solar);
         addSegment(selfBattery, battDischarge.bubble, 'battery', 'battery', entities.battery);
+        selfProducers.forEach(c => addSegment(c.power, c.iconColor, `consumer_${c.idx}`, c.label, c.entityId));
         addSegment(srcGrid, colGrid.bubble, 'grid', 'grid', entities.grid_combined || entities.grid);
         addSegment(destExport, colExport.bubble, 'export', 'export', entities.grid_combined || entities.grid_export || entities.grid);
       } else {
         addSegment(srcBattery, battDischarge.bubble, 'battery', 'battery', entities.battery);
         addSegment(srcSolar, colSolar.bubble, 'solar', 'solar', entities.solar);
         addSegment(srcGrid, colGrid.bubble, 'grid', 'grid', entities.grid_combined || entities.grid);
+        consumers.forEach(c => addSegment(c.production, c.iconColor, `consumer_${c.idx}`, c.label, c.entityId));
       }
 
       // color = icon, pipe = bracket line (identical unless a separate pipe color is configured)
@@ -1275,6 +1324,8 @@ console.log(
         if (type === 'grid') return { icon: this.config.grid_icon || 'mdi:transmission-tower', color: colGrid.icon, pipe: colGrid.pipe };
         if (type === 'battery') return { icon: this.config.battery_icon || 'mdi:battery-high', color: battDischarge.icon, pipe: battDischarge.pipe };
         if (type === 'export') return { icon: this.config.export_icon || 'mdi:arrow-right-box', color: colExport.icon, pipe: colExport.pipe };
+        const producer = consumers.find(c => type === `consumer_${c.idx}`);
+        if (producer) return { icon: producer.icon, color: producer.iconColor, pipe: producer.pipeColor };
         return { icon: '', color: '', pipe: '' };
       };
 
@@ -1298,6 +1349,7 @@ console.log(
         addTopBracket(srcSolar, 'solar', entities.solar);
         addTopBracket(srcBattery, 'battery', entities.battery);
         addTopBracket(srcGrid, 'grid', entities.grid_combined || entities.grid);
+        consumers.forEach(c => addTopBracket(c.production, `consumer_${c.idx}`, c.entityId));
       } else {
         topBrackets = barSegments.map(s => {
           const meta = bracketMeta(s.type);
@@ -1694,12 +1746,27 @@ console.log(
         }
       }
 
-      const solarToHouse = Math.max(0, solarVal - solarToBatt - gridExport);
-      const gridToHouse = Math.max(0, gridImport - gridToBatt);
-      const house = solarToHouse + gridToHouse + batteryDischarge;
+      const separateBatteryExport = this.config.separate_battery_export === true;
+      const splitFlows = separateBatteryExport
+        ? this._getSeparateExportFlows(solarVal, gridImport, gridExport, batteryCharge, batteryDischarge, entities)
+        : null;
+      if (separateBatteryExport) {
+        solarToBatt = splitFlows.solarToBatt;
+        gridToBatt = splitFlows.gridToBatt;
+      }
+      const solarToHouse = separateBatteryExport ? splitFlows.solarToHouse : Math.max(0, solarVal - solarToBatt - gridExport);
+      const gridToHouse = separateBatteryExport ? splitFlows.gridToHouse : Math.max(0, gridImport - gridToBatt);
+      const batteryToHouse = separateBatteryExport ? splitFlows.batteryToHouse : batteryDischarge;
+      const solarExport = separateBatteryExport ? splitFlows.solarExport : gridExport;
+      const batteryExport = separateBatteryExport ? splitFlows.batteryExport : 0;
+      const houseExport = separateBatteryExport ? splitFlows.houseExport : 0;
+      // Source shares use only the power delivered to House, excluding direct export.
+      const house = solarToHouse + gridToHouse + batteryToHouse;
+      const calculatedHouse = separateBatteryExport ? splitFlows.consumption : house;
+      const houseToBatt = batteryChargeViaHouse ? batteryCharge : 0;
 
       // Use house entity for display if defined, otherwise use calculated value
-      const houseDisplay = (entities.house && entities.house !== "") ? getVal(entities.house) : house;
+      const houseDisplay = (entities.house && entities.house !== "") ? getVal(entities.house) : calculatedHouse;
 
       // Solar→Batt arc only visible when battery is actively charging and not via house.
       // In the diamond layout the arc is part of the ring, so keep it as inactive pipe when inactive pipes are shown.
@@ -1746,11 +1813,11 @@ console.log(
 
       let houseDominantColor = 'var(--neon-pink)';
       if (house > 0) {
-        if (solarToHouse >= gridToHouse && solarToHouse >= batteryDischarge) {
+        if (solarToHouse >= gridToHouse && solarToHouse >= batteryToHouse) {
           houseDominantColor = 'var(--neon-yellow)';
-        } else if (gridToHouse >= solarToHouse && gridToHouse >= batteryDischarge) {
+        } else if (gridToHouse >= solarToHouse && gridToHouse >= batteryToHouse) {
           houseDominantColor = 'var(--neon-blue)';
-        } else if (batteryDischarge >= solarToHouse && batteryDischarge >= gridToHouse) {
+        } else if (batteryToHouse >= solarToHouse && batteryToHouse >= gridToHouse) {
           houseDominantColor = 'var(--neon-green)';
         }
       }
@@ -1759,7 +1826,7 @@ console.log(
         if (house > 0) {
           const pctSolar = (solarToHouse / house) * 100;
           const pctGrid = (gridToHouse / house) * 100;
-          const pctBatt = (batteryDischarge / house) * 100;
+          const pctBatt = (batteryToHouse / house) * 100;
 
           let stops = [];
           let current = 0;
@@ -1771,11 +1838,11 @@ console.log(
           houseGradientVal = `conic-gradient(from 330deg, ${stops.join(', ')})`;
 
           if (useColoredValues) {
-            const maxVal = Math.max(solarToHouse, gridToHouse, batteryDischarge);
+            const maxVal = Math.max(solarToHouse, gridToHouse, batteryToHouse);
             if (maxVal > 0) {
               if (maxVal === solarToHouse) houseTextCol = 'var(--neon-yellow)';
               else if (maxVal === gridToHouse) houseTextCol = 'var(--neon-blue)';
-              else if (maxVal === batteryDischarge) houseTextCol = 'var(--neon-green)';
+              else if (maxVal === batteryToHouse) houseTextCol = 'var(--neon-green)';
             } else {
               houseTextCol = 'var(--neon-pink)';
             }
@@ -2037,6 +2104,9 @@ console.log(
         if (l) return `M ${l[3]} ${l[4]} L ${l[1]} ${l[2]}`;
         return d;
       };
+      const pathBattExport = reversePath(pathGridToBatt);
+      const styleBatteryExport = (separateBatteryExport && hasBattery && hasGrid) ? '' : 'display:none;';
+      const styleHouseExport = separateBatteryExport && houseExport > 1 ? styleGrid : 'display:none;';
       const flowPathC1 = c1Raw < 0 ? reversePath(pathHouseC1) : pathHouseC1;
       const flowPathC2 = c2Raw < 0 ? reversePath(pathHouseC2) : pathHouseC2;
       const flowPathC3 = c3Raw < 0 ? reversePath(pathHouseC3) : pathHouseC3;
@@ -2061,12 +2131,15 @@ console.log(
                     <path class="bg-path bg-solar" d="${pathSolarBatt}" style="${getPipeStyle(solarToBatt, '--pipe-solar-opacity')} ${styleSolarBatt}" />
                     
                     <path class="bg-path bg-grid" d="${pathGridImport}" style="${getPipeStyle(gridToHouse, '--pipe-grid-opacity')} ${styleGrid}" />
-                    <path class="bg-path bg-export" d="${activeExportPath}" style="${getPipeStyle(gridExport, '--pipe-grid-opacity')} ${styleGrid}" />
+                    <path class="bg-path bg-export" d="${separateBatteryExport ? pathGridExport : activeExportPath}" style="${getPipeStyle(solarExport, '--pipe-grid-opacity')} ${styleGrid}" />
                     <path class="bg-path bg-grid" d="${pathGridToBatt}" style="${getPipeStyle(gridToBatt, '--pipe-grid-opacity')} ${styleGridBatt}" />
                     
-                    <path class="bg-path bg-battery" d="${pathBattHouse}" style="${getPipeStyle(batteryDischarge, '--pipe-battery-opacity')} ${styleBattery}" />
+                    <path class="bg-path bg-export" d="${pathBattExport}" style="${getPipeStyle(batteryExport, '--pipe-battery-opacity')} ${styleBatteryExport}" />
+                    <path class="bg-path bg-export" d="${pathHouseExport}" style="${getPipeStyle(houseExport, '--pipe-grid-opacity')} ${styleHouseExport}" />
 
-                    <path class="bg-path bg-battery" d="${pathHouseToBatt}" style="${(batteryChargeViaHouse && batteryCharge > 0) ? getPipeStyle(batteryCharge, '--pipe-battery-opacity') + ' ' + styleBattery : 'display:none;'}" />
+                    <path class="bg-path bg-battery" d="${pathBattHouse}" style="${getPipeStyle(batteryToHouse, '--pipe-battery-opacity')} ${styleBattery}" />
+
+                    <path class="bg-path bg-battery" d="${pathHouseToBatt}" style="${(houseToBatt > 0) ? getPipeStyle(houseToBatt, '--pipe-battery-opacity') + ' ' + styleBattery : 'display:none;'}" />
 
                     <path d="${pathHouseC1}" fill="none" stroke="${this._getConsumerPipeColor(1)}" stroke-width="6" style="${getConsumerPipeStyle(c1PipeActive, c1Val, 1)}" />
                     <path d="${pathHouseC2}" fill="none" stroke="${this._getConsumerPipeColor(2)}" stroke-width="6" style="${getConsumerPipeStyle(c2PipeActive, c2Val, 2)}" />
@@ -2078,12 +2151,15 @@ console.log(
                     <path class="flow-line flow-solar" d="${pathSolarBatt}" style="${getAnimStyle(solarToBatt, '--pipe-solar-opacity')} ${styleSolarBatt}" />
                     
                     <path class="flow-line flow-grid" d="${pathGridImport}" style="${getAnimStyle(gridToHouse, '--pipe-grid-opacity')} ${styleGrid}" />
-                    <path class="flow-line flow-export" d="${activeExportPath}" style="${getAnimStyle(gridExport, '--pipe-grid-opacity')} ${styleGrid}" />
+                    <path class="flow-line flow-export" d="${separateBatteryExport ? pathGridExport : activeExportPath}" style="${getAnimStyle(solarExport, '--pipe-grid-opacity')} ${styleGrid}" />
                     <path class="flow-line flow-grid" d="${pathGridToBatt}" style="${getAnimStyle(gridToBatt, '--pipe-grid-opacity')} ${styleGridBatt}" />
                     
-                    <path class="flow-line flow-battery" d="${pathBattHouse}" style="${getAnimStyle(batteryDischarge, '--pipe-battery-opacity')} ${styleBattery}" />
+                    <path class="flow-line flow-export" d="${pathBattExport}" style="${getAnimStyle(batteryExport, '--pipe-battery-opacity')} ${styleBatteryExport}" />
+                    <path class="flow-line flow-export" d="${pathHouseExport}" style="${getAnimStyle(houseExport, '--pipe-grid-opacity')} ${styleHouseExport}" />
 
-                    <path class="flow-line flow-battery" d="${pathHouseToBatt}" style="${(batteryChargeViaHouse && batteryCharge > 0) ? getAnimStyle(batteryCharge, '--pipe-battery-opacity') + ' ' + styleBattery : 'display:none;'}" />
+                    <path class="flow-line flow-battery" d="${pathBattHouse}" style="${getAnimStyle(batteryToHouse, '--pipe-battery-opacity')} ${styleBattery}" />
+
+                    <path class="flow-line flow-battery" d="${pathHouseToBatt}" style="${(houseToBatt > 0) ? getAnimStyle(houseToBatt, '--pipe-battery-opacity') + ' ' + styleBattery : 'display:none;'}" />
 
                     <path class="flow-line" d="${flowPathC1}" stroke="${this._getConsumerPipeColor(1)}" style="${getConsumerAnimStyle(c1PipeActive, c1Val, 1)}" />
                     <path class="flow-line" d="${flowPathC2}" stroke="${this._getConsumerPipeColor(2)}" style="${getConsumerAnimStyle(c2PipeActive, c2Val, 2)}" />
@@ -2095,12 +2171,14 @@ console.log(
                     <text class="${textClass} text-solar pos-solar-batt" style="${getTextStyle(solarToBatt, 'solar')} ${styleSolarBatt}">${this._formatPower(solarToBatt)}</text>
 
                     <text class="${textClass} text-grid pos-grid-house" style="${getTextStyle(gridToHouse, 'grid')} ${styleGrid}">${this._formatPower(gridToHouse)}</text>
-                    <text class="${textClass} text-export ${exportFromSolar ? 'pos-export-solar' : 'pos-export-grid'}" style="${getTextStyle(gridExport, 'grid')} ${styleGrid}">${this._formatPower(gridExport)}</text>
+                    <text class="${textClass} text-export ${separateBatteryExport || exportFromSolar ? 'pos-export-solar' : 'pos-export-grid'}" style="${getTextStyle(solarExport, 'grid')} ${styleGrid}">${this._formatPower(solarExport)}</text>
+                    <text class="${textClass} text-export pos-batt-export" style="${getTextStyle(batteryExport, 'battery')} ${styleBatteryExport}">${this._formatPower(batteryExport)}</text>
+                    <text class="${textClass} text-export pos-export-grid" style="${getTextStyle(houseExport, 'grid')} ${styleHouseExport}">${this._formatPower(houseExport)}</text>
                     <text class="${textClass} text-grid pos-grid-batt" style="${getTextStyle(gridToBatt, 'grid')} ${styleGridBatt}">${this._formatPower(gridToBatt)}</text>
 
-                    <text class="${textClass} text-battery pos-batt-house" style="${getTextStyle(batteryDischarge, 'battery')} ${styleBattery}">${this._formatPower(batteryDischarge)}</text>
+                    <text class="${textClass} text-battery pos-batt-house" style="${getTextStyle(batteryToHouse, 'battery')} ${styleBattery}">${this._formatPower(batteryToHouse)}</text>
 
-                    <text class="${textClass} text-battery pos-batt-house" style="${(batteryChargeViaHouse && batteryCharge > 0) ? getTextStyle(batteryCharge, 'battery') + ' ' + styleBattery : 'display:none;'}">${this._formatPower(batteryCharge)}</text>
+                    <text class="${textClass} text-battery pos-batt-house" style="${(houseToBatt > 0) ? getTextStyle(houseToBatt, 'battery') + ' ' + styleBattery : 'display:none;'}">${this._formatPower(houseToBatt)}</text>
 
                 </svg>
 

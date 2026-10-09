@@ -96,6 +96,8 @@ export default {
     "editor.text_color": "Text",
     "editor.icon_color": "Icon",
     "editor.secondary_color": "Secondary",
+    "editor.separate_battery_export": "Batterie-Einspeisung separat anzeigen",
+    "editor.separate_battery_export_hint": "Teilt die Netzeinspeisung zwischen Solar und Batterie auf, mit direktem Batterie-Netz-Fluss. Zuerst wird die Ladung zugeordnet, dann die Solar-Einspeisung; die verbleibende Einspeisung kommt aus der Batterie.",
     "editor.battery_charge_via_house": "Batterie-Ladung über Hausverbrauch umleiten",
     "editor.battery_show_power": "Zeige Leistung statt SoC",
     "editor.solar_unit_kw": "Solar in kW anzeigen",
