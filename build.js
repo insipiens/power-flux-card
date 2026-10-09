@@ -76,3 +76,14 @@ ${mainContent}
 
 fs.writeFileSync(OUTPUT_FILE, finalContent);
 console.log(`Build complete: ${OUTPUT_FILE}`);
+
+// Independently registered comparison card, safe to load alongside the original.
+const exportOutputFile = path.join(DIST_DIR, 'power-flux-card-export.js');
+const exportContent = finalContent
+    .replace(/power-flux-card-editor/g, 'power-flux-card-export-editor')
+    .replace(/"power-flux-card"/g, '"power-flux-card-export"')
+    .replace('Power Flux Card v_2.9 ready', 'Power Flux Card Export v_2.9 ready')
+    .replace('name: "Power Flux Card"', 'name: "Power Flux Card Export"')
+    .replace('description: "Advanced Animated Energy Flow Card"', 'description: "Power Flux Card with optional separate solar and battery export"');
+fs.writeFileSync(exportOutputFile, exportContent);
+console.log(`Build complete: ${exportOutputFile}`);
